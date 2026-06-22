@@ -1,0 +1,27 @@
+There is no explicit on_post_compress method on the MemoryProvider ABC, but he does not need to touch Hermes internals to hook the event. 
+
+Hermes already fires a signal immediately after compression completes via the on_session_switch hook. 
+
+When context compression succeeds, the agent splits the SQLite transcript, rotates to a newly generated session_id, and notifies the memory provider by calling on_session_switch. It passes a specific reason kwarg to identify that the switch was caused by compaction rather than a /resume or /branch.
+
+He just needs to implement on_session_switch in his provider like this:
+
+```
+def on_session_switch(
+    self,
+    new_session_id: str,
+    *,
+    parent_session_id: str = "",
+    reset: bool = False,
+    rewound: bool = False,
+    **kwargs,
+) -> None:
+    if kwargs.get("reason") == "compression":
+        # Compression just completed!
+        # new_session_id = the fresh session we just rotated into
+        # parent_session_id = the old session_id that was compressed
+        pass
+```
+
+The documentation for on_session_switch confirms this is the intended design: "Fires on /resume, /branch, /reset, /new... and context compression — any path that reassigns AIAgent.session_id without tearing the provider down."
+
