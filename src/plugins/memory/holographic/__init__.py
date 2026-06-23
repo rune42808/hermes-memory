@@ -63,7 +63,7 @@ FACT_STORE_SCHEMA = {
             "entity": {"type": "string", "description": "Entity name for 'probe'/'related'."},
             "entities": {"type": "array", "items": {"type": "string"}, "description": "Entity names for 'reason'."},
             "fact_id": {"type": "integer", "description": "Fact ID for 'update'/'remove'."},
-            "category": {"type": "string", "enum": ["user_pref", "project", "tool", "general"]},
+            "category": {"type": "string", "enum": ["user_pref", "project", "tool", "general", "infrastructure"]},
             "tags": {"type": "string", "description": "Comma-separated tags."},
             "trust_delta": {"type": "number", "description": "Trust adjustment for 'update'."},
             "min_trust": {"type": "number", "description": "Minimum trust filter (default: 0.3)."},
@@ -153,6 +153,10 @@ class HolographicMemoryProvider(MemoryProvider):
             {"key": "auto_extract", "description": "Auto-extract facts at session end", "default": "false", "choices": ["true", "false"]},
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
+            {"key": "okf_bundle_path",        "description": "OKF bundle path for infrastructure facts",              "default": "/shared/agents/common/infrastructure/"},
+            {"key": "bootstrap_inject_limit", "description": "Max facts injected after context compression",          "default": "15"},
+            {"key": "bootstrap_min_trust",    "description": "Minimum trust score for post-compaction injection",     "default": "0.7"},
+            {"key": "bootstrap_shadow",       "description": "Log what would inject without injecting (shadow mode)", "default": "false", "choices": ["true", "false"]},
         ]
 
     def initialize(self, session_id: str, **kwargs) -> None:
