@@ -135,3 +135,96 @@ def parse_okf_concept(file_path: Path, bundle_root: Path) -> ParsedConcept | Non
         timestamp=str(fm.get("timestamp") or ""),
         file_path=rel_path,
     )
+
+
+class OKFIngestor:
+    """Walk an OKF bundle and upsert facts into the Holographic store."""
+
+    def __init__(self, store) -> None:
+        self._store = store
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        self._store._conn.executescript(_STATE_SCHEMA)
+        self._store._conn.commit()
+
+    def ingest_bundle(
+        self, bundle_path: "str | Path", *, dry_run: bool = False
+    ) -> IngestResult:
+        bundle_root = Path(bundle_path).expanduser().resolve()
+        result = IngestResult()
+
+        if not bundle_root.exists():
+            result.errors.append(f"Bundle path does not exist: {bundle_root}")
+            return result
+
+        for md_file in sorted(bundle_root.rglob("*.md")):
+            if md_file.name in _SKIP_FILENAMES:
+                continue
+            outcome = self._ingest_file(bundle_root, md_file, dry_run=dry_run)
+            if outcome == "added":
+                result.added += 1
+            elif outcome == "updated":
+                result.updated += 1
+            elif outcome == "skipped":
+                result.skipped += 1
+            elif outcome is not None:
+                result.errors.append(f"{md_file.name}: {outcome}")
+
+        return result
+
+    def _ingest_file(
+        self, bundle_root: Path, file_path: Path, *, dry_run: bool
+    ) -> "str | None":
+        concept = parse_okf_concept(file_path, bundle_root)
+        if concept is None:
+            return None  # silently skip unparseable files (missing type, etc.)
+
+        bundle_str = str(bundle_root)
+
+        row = self._store._conn.execute(
+            "SELECT timestamp, fact_id FROM okf_ingestion_state "
+            "WHERE bundle_path = ? AND file_path = ?",
+            (bundle_str, concept.file_path),
+        ).fetchone()
+
+        if row is not None:
+            stored_ts = row[0]
+            stored_id = row[1]
+            if stored_ts and stored_ts == concept.timestamp:
+                return "skipped"
+            # Timestamp changed — update
+            if not dry_run:
+                self._store.update_fact(
+                    stored_id,
+                    content=concept.content,
+                    tags=concept.tags_str,
+                    category=concept.category,
+                )
+                self._store._conn.execute(
+                    "UPDATE okf_ingestion_state "
+                    "SET timestamp = ?, ingested_at = CURRENT_TIMESTAMP "
+                    "WHERE bundle_path = ? AND file_path = ?",
+                    (concept.timestamp, bundle_str, concept.file_path),
+                )
+                self._store._conn.commit()
+            return "updated"
+
+        # New concept
+        if not dry_run:
+            fact_id = self._store.add_fact(
+                concept.content,
+                category=concept.category,
+                tags=concept.tags_str,
+            )
+            # Adjust trust from store default (0.5) to desired level
+            trust_delta = concept.trust - self._store.default_trust
+            if abs(trust_delta) > 0.001:
+                self._store.update_fact(fact_id, trust_delta=trust_delta)
+            self._store._conn.execute(
+                "INSERT INTO okf_ingestion_state "
+                "(bundle_path, file_path, timestamp, fact_id) VALUES (?, ?, ?, ?)",
+                (bundle_str, concept.file_path, concept.timestamp, fact_id),
+            )
+            self._store._conn.commit()
+        return "added"
