@@ -188,6 +188,7 @@ class HolographicMemoryProvider(MemoryProvider):
 
     def system_prompt_block(self) -> str:
         if not self._store:
+            self._post_compaction = False
             return ""
 
         bootstrap_block = ""

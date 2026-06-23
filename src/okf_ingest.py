@@ -257,7 +257,6 @@ if __name__ == "__main__":
 
     # Stub Hermes modules when running standalone (outside a Hermes installation).
     # Uses try/except so a real Hermes install takes precedence automatically.
-    sys.path.insert(0, str(Path("/Users/bnaylor/agents/common/projects/cross-channel-awareness/src")))
     try:
         import hermes_constants as _hc  # noqa: F401
     except ImportError:

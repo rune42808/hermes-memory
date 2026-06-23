@@ -164,3 +164,11 @@ class TestBootstrapInjection:
         block = p.system_prompt_block()
         fact_lines = [l for l in block.splitlines() if l.strip().startswith("-")]
         assert len(fact_lines) <= 2
+
+    def test_flag_cleared_when_store_not_initialized(self):
+        p = HolographicMemoryProvider(config={})
+        # Set the flag without calling initialize() — store is None
+        p._post_compaction = True
+        block = p.system_prompt_block()
+        assert block == ""
+        assert p._post_compaction is False

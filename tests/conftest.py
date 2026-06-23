@@ -53,4 +53,3 @@ sys.modules["tools.registry"] = _tools_registry
 # Add project src/ and the holographic plugin tree to sys.path
 _here = Path(__file__).parent
 sys.path.insert(0, str(_here.parent / "src"))
-sys.path.append(str(Path("/Users/bnaylor/agents/common/projects/cross-channel-awareness/src")))
