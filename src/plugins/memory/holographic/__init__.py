@@ -120,6 +120,8 @@ class HolographicMemoryProvider(MemoryProvider):
         self._store = None
         self._retriever = None
         self._min_trust = float(self._config.get("min_trust_threshold", 0.3))
+        self._post_compaction: bool = False
+        self._post_compaction_parent: str = ""
 
     @property
     def name(self) -> str:
@@ -187,25 +189,40 @@ class HolographicMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         if not self._store:
             return ""
+
+        bootstrap_block = ""
+        if self._post_compaction:
+            self._post_compaction = False
+            try:
+                bootstrap_block = self._build_bootstrap_block()
+            except Exception as exc:
+                logger.debug("system_prompt_block: bootstrap build failed: %s", exc)
+
         try:
             total = self._store._conn.execute(
                 "SELECT COUNT(*) FROM facts"
             ).fetchone()[0]
         except Exception:
             total = 0
+
         if total == 0:
-            return (
+            memory_block = (
                 "# Holographic Memory\n"
                 "Active. Empty fact store — proactively add facts the user would expect you to remember.\n"
                 "Use fact_store(action='add') to store durable structured facts about people, projects, preferences, decisions.\n"
                 "Use fact_feedback to rate facts after using them (trains trust scores)."
             )
-        return (
-            f"# Holographic Memory\n"
-            f"Active. {total} facts stored with entity resolution and trust scoring.\n"
-            f"Use fact_store to search, probe entities, reason across entities, or add facts.\n"
-            f"Use fact_feedback to rate facts after using them (trains trust scores)."
-        )
+        else:
+            memory_block = (
+                f"# Holographic Memory\n"
+                f"Active. {total} facts stored with entity resolution and trust scoring.\n"
+                f"Use fact_store to search, probe entities, reason across entities, or add facts.\n"
+                f"Use fact_feedback to rate facts after using them (trains trust scores)."
+            )
+
+        if bootstrap_block:
+            return bootstrap_block + "\n\n" + memory_block
+        return memory_block
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self._retriever or not query:
@@ -325,6 +342,65 @@ class HolographicMemoryProvider(MemoryProvider):
         # Holographic memory stores explicit facts via tools, not auto-sync.
         # The on_session_end hook handles auto-extraction if configured.
         pass
+
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        rewound: bool = False,
+        **kwargs,
+    ) -> None:
+        if kwargs.get("reason") == "compression":
+            self._post_compaction = True
+            self._post_compaction_parent = parent_session_id
+
+    def _build_bootstrap_block(self) -> str:
+        """Fetch top infrastructure facts and format as a Bootstrap Context block.
+
+        Returns "" in shadow mode (facts are only logged) or when store is empty.
+        """
+        shadow = bool(self._config.get("bootstrap_shadow", False))
+        limit = int(self._config.get("bootstrap_inject_limit", 15))
+        min_trust = float(self._config.get("bootstrap_min_trust", 0.7))
+
+        try:
+            facts = self._store.list_facts(
+                category="infrastructure", min_trust=min_trust, limit=limit
+            )
+        except Exception as exc:
+            logger.debug("_build_bootstrap_block: list_facts failed: %s", exc)
+            return ""
+
+        if not facts:
+            return ""
+
+        if shadow:
+            logger.info(
+                "BOOTSTRAP:shadow post-compaction would inject %d infrastructure facts",
+                len(facts),
+            )
+            for f in facts:
+                logger.info(
+                    "BOOTSTRAP:shadow [%.1f] %.80s",
+                    f.get("trust_score", 0),
+                    f.get("content", ""),
+                )
+            return ""
+
+        lines = [
+            "## Bootstrap Context (Post-Compaction Recovery)",
+            "",
+            "Context was just compressed. Key infrastructure facts re-injected:",
+            "",
+        ]
+        for f in facts:
+            trust = f.get("trust_score", 0)
+            content = f.get("content", "")
+            lines.append(f"- [{trust:.1f}] {content}")
+
+        return "\n".join(lines)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
