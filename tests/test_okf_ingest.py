@@ -280,3 +280,30 @@ class TestOKFIngestor:
         result = ingestor.ingest_bundle(bundle)
         assert result.added == 0
         assert result.skipped == 0  # skipped filenames aren't counted as skipped
+
+
+import subprocess
+import sys
+
+
+class TestCLI:
+    def test_dry_run_prints_summary(self, bundle_with_facts, tmp_path):
+        db = tmp_path / "cli_test.db"
+        result = subprocess.run(
+            [sys.executable, "-m", "okf_ingest",
+             str(bundle_with_facts), "--db", str(db), "--dry-run"],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent / "src"),
+        )
+        assert result.returncode == 0
+        assert "added=2" in result.stdout
+
+    def test_missing_bundle_exits_nonzero(self, tmp_path):
+        db = tmp_path / "cli_test.db"
+        result = subprocess.run(
+            [sys.executable, "-m", "okf_ingest",
+             str(tmp_path / "no_such_dir"), "--db", str(db)],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent / "src"),
+        )
+        assert result.returncode != 0
