@@ -2,7 +2,6 @@
 import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock
 
 # --- Mock Hermes imports so MemoryStore is importable without a Hermes install ---
 
@@ -54,4 +53,4 @@ sys.modules["tools.registry"] = _tools_registry
 # Add project src/ and the holographic plugin tree to sys.path
 _here = Path(__file__).parent
 sys.path.insert(0, str(_here.parent / "src"))
-sys.path.insert(0, str(Path("/Users/bnaylor/agents/common/projects/cross-channel-awareness/src")))
+sys.path.append(str(Path("/Users/bnaylor/agents/common/projects/cross-channel-awareness/src")))
