@@ -255,53 +255,56 @@ if __name__ == "__main__":
     else:
         logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 
-    # Mock Hermes imports so MemoryStore is importable without a Hermes install
-    _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: Path("/tmp/hermes_test_home")
-    _hermes_constants.display_hermes_home = lambda: "/tmp/hermes_test_home"
-    sys.modules["hermes_constants"] = _hermes_constants
-
-    _hermes_state = types.ModuleType("hermes_state")
-    _hermes_state.apply_wal_with_fallback = lambda conn, db_label="": None
-    sys.modules["hermes_state"] = _hermes_state
-
-    _hermes_cli = types.ModuleType("hermes_cli")
-    _hermes_cli_config = types.ModuleType("hermes_cli.config")
-    _hermes_cli_config.cfg_get = lambda cfg, *keys, default=None: default
-    sys.modules["hermes_cli"] = _hermes_cli
-    sys.modules["hermes_cli.config"] = _hermes_cli_config
-
-    _agent = types.ModuleType("agent")
-    _agent_mp = types.ModuleType("agent.memory_provider")
-
-    class MemoryProvider:
-        def initialize(self, session_id, **kwargs): pass
-        def system_prompt_block(self): return ""
-        def prefetch(self, query, *, session_id=""): return ""
-        def sync_turn(self, user_content, assistant_content, *, session_id=""): pass
-        def get_tool_schemas(self): return []
-        def handle_tool_call(self, tool_name, args, **kwargs): return ""
-        def on_session_end(self, messages): pass
-        def on_memory_write(self, action, target, content): pass
-        def on_session_switch(self, new_session_id, **kwargs): pass
-        def shutdown(self): pass
-        def is_available(self): return True
-        def save_config(self, values, hermes_home): pass
-        def get_config_schema(self): return []
-        @property
-        def name(self): return "base"
-
-    _agent_mp.MemoryProvider = MemoryProvider
-    sys.modules["agent"] = _agent
-    sys.modules["agent.memory_provider"] = _agent_mp
-
-    _tools = types.ModuleType("tools")
-    _tools_registry = types.ModuleType("tools.registry")
-    _tools_registry.tool_error = lambda msg: f'{{"error": "{msg}"}}'
-    sys.modules["tools"] = _tools
-    sys.modules["tools.registry"] = _tools_registry
-
+    # Stub Hermes modules when running standalone (outside a Hermes installation).
+    # Uses try/except so a real Hermes install takes precedence automatically.
     sys.path.insert(0, str(Path("/Users/bnaylor/agents/common/projects/cross-channel-awareness/src")))
+    try:
+        import hermes_constants as _hc  # noqa: F401
+    except ImportError:
+        _hc_stub = types.ModuleType("hermes_constants")
+        setattr(_hc_stub, "get_hermes_home", lambda: Path.home() / ".hermes")
+        setattr(_hc_stub, "display_hermes_home", lambda: str(Path.home() / ".hermes"))
+        sys.modules["hermes_constants"] = _hc_stub
+    try:
+        import hermes_state as _hs  # noqa: F401
+    except ImportError:
+        _hs_stub = types.ModuleType("hermes_state")
+        setattr(_hs_stub, "apply_wal_with_fallback", lambda conn, db_label="": None)
+        sys.modules["hermes_state"] = _hs_stub
+    if "hermes_cli" not in sys.modules:
+        sys.modules["hermes_cli"] = types.ModuleType("hermes_cli")
+    if "hermes_cli.config" not in sys.modules:
+        _cfg_stub = types.ModuleType("hermes_cli.config")
+        setattr(_cfg_stub, "cfg_get", lambda cfg, *keys, default=None: default)
+        sys.modules["hermes_cli.config"] = _cfg_stub
+    if "agent" not in sys.modules:
+        sys.modules["agent"] = types.ModuleType("agent")
+    if "agent.memory_provider" not in sys.modules:
+        class _MemoryProvider:
+            def initialize(self, session_id, **kwargs): pass
+            def system_prompt_block(self): return ""
+            def prefetch(self, query, *, session_id=""): return ""
+            def sync_turn(self, user_content, assistant_content, *, session_id=""): pass
+            def get_tool_schemas(self): return []
+            def handle_tool_call(self, tool_name, args, **kwargs): return ""
+            def on_session_end(self, messages): pass
+            def on_memory_write(self, action, target, content): pass
+            def on_session_switch(self, new_session_id, **kwargs): pass
+            def shutdown(self): pass
+            def is_available(self): return True
+            def save_config(self, values, hermes_home): pass
+            def get_config_schema(self): return []
+            @property
+            def name(self): return "base"
+        _amp_stub = types.ModuleType("agent.memory_provider")
+        setattr(_amp_stub, "MemoryProvider", _MemoryProvider)
+        sys.modules["agent.memory_provider"] = _amp_stub
+    if "tools" not in sys.modules:
+        sys.modules["tools"] = types.ModuleType("tools")
+    if "tools.registry" not in sys.modules:
+        _tr_stub = types.ModuleType("tools.registry")
+        setattr(_tr_stub, "tool_error", lambda msg: f'{{"error": "{msg}"}}')
+        sys.modules["tools.registry"] = _tr_stub
     from plugins.memory.holographic.store import MemoryStore
 
     store = MemoryStore(db_path=args.db)
