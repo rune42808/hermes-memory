@@ -2,7 +2,7 @@
 import textwrap
 from pathlib import Path
 import pytest
-from okf_ingest import parse_okf_concept, ParsedConcept, _BOOTSTRAP_TRUST, _STANDARD_TRUST
+from okf_ingest import parse_okf_concept, ParsedConcept, _HUMAN_TRUST, _AGENT_TRUST, _DEFAULT_TRUST
 
 
 @pytest.fixture
@@ -35,14 +35,14 @@ class TestParseOkfConcept:
         assert result is not None
         assert result.content == "rune-host: Rune runs on hive.local, a Proxmox VM."
         assert result.category == "infrastructure"
-        assert result.trust == _BOOTSTRAP_TRUST
+        assert result.trust == _HUMAN_TRUST
         assert "bootstrap" in result.tags_str
         assert "source:okf" in result.tags_str
         assert "type:Host" in result.tags_str
         assert result.timestamp == "2026-06-22T00:00:00Z"
         assert result.file_path == "hosts/rune.md"
 
-    def test_no_bootstrap_flag(self, bundle):
+    def test_no_bootstrap_flag_and_no_verified_defaults_to_05(self, bundle):
         f = write_concept(bundle, "clusters/prod.md", """\
             ---
             type: Cluster
@@ -54,8 +54,88 @@ class TestParseOkfConcept:
         """)
         result = parse_okf_concept(f, bundle)
         assert result is not None
-        assert result.trust == _STANDARD_TRUST
+        assert result.trust == _DEFAULT_TRUST
         assert "bootstrap" not in result.tags_str
+
+    def test_verified_by_human_gives_09_trust(self, bundle):
+        f = write_concept(bundle, "services/actual-budget.md", """\
+            ---
+            type: Service
+            title: Actual Budget
+            description: Personal finance with GoCardless sync.
+            tags: [service, finance]
+            verified:
+              at: "2026-07-22"
+              by: "human:scromp"
+            ---
+        """)
+        result = parse_okf_concept(f, bundle)
+        assert result is not None
+        assert result.trust == _HUMAN_TRUST
+
+    def test_verified_by_agent_gives_07_trust(self, bundle):
+        f = write_concept(bundle, "services/nats.md", """\
+            ---
+            type: Service
+            title: NATS
+            description: Inter-agent messaging bus.
+            tags: [service, messaging]
+            verified:
+              at: "2026-07-20"
+              by: "agent:clomp"
+            ---
+        """)
+        result = parse_okf_concept(f, bundle)
+        assert result is not None
+        assert result.trust == _AGENT_TRUST
+
+    def test_no_verified_block_defaults_to_05(self, bundle):
+        f = write_concept(bundle, "services/smokeping.md", """\
+            ---
+            type: Service
+            title: SmokePing
+            description: Latency monitoring.
+            tags: [service, monitoring]
+            ---
+        """)
+        result = parse_okf_concept(f, bundle)
+        assert result is not None
+        assert result.trust == _DEFAULT_TRUST
+
+    def test_status_deprecated_returns_none(self, bundle):
+        f = write_concept(bundle, "services/old-thing.md", """\
+            ---
+            type: Service
+            title: Old Thing
+            description: Deprecated service.
+            status: deprecated
+            ---
+        """)
+        assert parse_okf_concept(f, bundle) is None
+
+    def test_stale_after_past_returns_none(self, bundle):
+        f = write_concept(bundle, "services/expired.md", """\
+            ---
+            type: Service
+            title: Expired
+            description: This is stale.
+            stale_after: "2020-01-01"
+            ---
+        """)
+        assert parse_okf_concept(f, bundle) is None
+
+    def test_stale_after_future_is_accepted(self, bundle):
+        f = write_concept(bundle, "services/future.md", """\
+            ---
+            type: Service
+            title: Future
+            description: Not stale yet.
+            stale_after: "2099-12-31"
+            ---
+        """)
+        result = parse_okf_concept(f, bundle)
+        assert result is not None
+        assert result.trust == _DEFAULT_TRUST
 
     def test_missing_description_falls_back_to_body(self, bundle):
         f = write_concept(bundle, "hosts/clomp.md", """\
@@ -219,12 +299,12 @@ class TestOKFIngestor:
         assert len(facts) == 2
 
     def test_bootstrap_fact_has_high_trust(self, tmp_db, bundle_with_facts):
-        from okf_ingest import OKFIngestor, _BOOTSTRAP_TRUST
+        from okf_ingest import OKFIngestor, _HUMAN_TRUST
         ingestor = OKFIngestor(tmp_db)
         ingestor.ingest_bundle(bundle_with_facts)
         facts = tmp_db.list_facts(category="infrastructure", min_trust=0.85)
         assert len(facts) == 1
-        assert abs(facts[0]["trust_score"] - _BOOTSTRAP_TRUST) < 0.01
+        assert abs(facts[0]["trust_score"] - _HUMAN_TRUST) < 0.01
 
     def test_second_run_skips_unchanged(self, tmp_db, bundle_with_facts):
         from okf_ingest import OKFIngestor
@@ -280,6 +360,81 @@ class TestOKFIngestor:
         result = ingestor.ingest_bundle(bundle)
         assert result.added == 0
         assert result.skipped == 0  # skipped filenames aren't counted as skipped
+
+    def test_deprecated_file_gets_purged(self, tmp_db, bundle):
+        """Verify that a previously-ingested file marked deprecated is purged."""
+        from okf_ingest import OKFIngestor
+
+        # Ingest a valid file first
+        write_concept(bundle, "hosts/rune.md", """\
+            ---
+            type: Host
+            title: rune-host
+            description: Runs on hive.local, Proxmox VM.
+            tags: [host]
+            bootstrap: true
+            ---
+        """)
+        ingestor = OKFIngestor(tmp_db)
+        result1 = ingestor.ingest_bundle(bundle)
+        assert result1.added == 1
+
+        # Now mark it deprecated
+        write_concept(bundle, "hosts/rune.md", """\
+            ---
+            type: Host
+            title: rune-host
+            description: Runs on hive.local, Proxmox VM.
+            tags: [host]
+            status: deprecated
+            ---
+        """)
+        result2 = ingestor.ingest_bundle(bundle)
+        assert result2.purged == 1
+        assert result2.added == 0
+
+        # Verify fact was removed from store
+        facts = tmp_db.list_facts(category="infrastructure")
+        assert len(facts) == 0
+
+    def test_orphaned_state_row_reingested(self, tmp_db, bundle):
+        """When a fact is deleted but its state row survives, re-ingest adds it back."""
+        from okf_ingest import OKFIngestor
+
+        # Ingest a fact normally
+        write_concept(bundle, "hosts/rune.md", """\
+            ---
+            type: Host
+            title: rune-host
+            description: Runs on hive.local, Proxmox VM.
+            timestamp: 2026-06-22T00:00:00Z
+            tags: [host]
+            ---
+        """)
+        ingestor = OKFIngestor(tmp_db)
+        result1 = ingestor.ingest_bundle(bundle)
+        assert result1.added == 1
+
+        # Simulate orphan: delete the fact but leave the state row
+        tmp_db._conn.execute("DELETE FROM facts")
+        tmp_db._conn.commit()
+        facts_after_delete = tmp_db.list_facts(category="infrastructure")
+        assert len(facts_after_delete) == 0
+
+        # Verify state row still exists
+        state_rows = tmp_db._conn.execute(
+            "SELECT COUNT(*) FROM okf_ingestion_state"
+        ).fetchone()[0]
+        assert state_rows == 1, "state row should survive fact deletion"
+
+        # Re-ingest the same file — should add (not skip), repairing the orphan
+        result2 = ingestor.ingest_bundle(bundle)
+        assert result2.added == 1, f"expected added=1 (repaired orphan), got {result2}"
+        assert result2.skipped == 0
+
+        # Verify fact is back
+        facts = tmp_db.list_facts(category="infrastructure")
+        assert len(facts) == 1
 
 
 import subprocess
