@@ -24,7 +24,10 @@ _StrTimestampLoader.add_constructor(
 _SKIP_FILENAMES = {"index.md", "log.md"}
 _SKIP_STATUSES = {"deprecated"}
 
-_DEFAULT_TRUST = 0.5           # Unverified / no verified block
+_DEFAULT_TRUST = 0.5           # Unverified / no verified block.
+                                # Intentionally below fact_store's default min_trust=0.7 —
+                                # new concepts without verified: or bootstrap: are invisible
+                                # to default searches. An agent or human must tag them.
 _AGENT_TRUST = 0.7             # verified.by: agent:...
 _HUMAN_TRUST = 0.9             # verified.by: human:... (or bootstrap: true)
 
@@ -70,7 +73,7 @@ def parse_okf_concept(file_path: Path, bundle_root: Path) -> ParsedConcept | Non
     """Parse an OKF v0.2 concept file. Returns None on any parse failure,
     or if the file is deprecated, expired (stale_after), or should be skipped.
 
-    Extracts: type (required), title, description, tags, timestamp, bootstap,
+    Extracts: type (required), title, description, tags, timestamp, bootstrap,
     category, trust signals (verified, status, stale_after).
     Falls back to first non-heading body line if description absent.
     Skips index.md and log.md (caller should filter, but we guard here too).
@@ -196,7 +199,6 @@ class OKFIngestor:
 
     def _content_exists(self, content: str) -> bool:
         """Check if content already exists in the fact store (early dedup)."""
-        fh = self._content_hash(content)
         row = self._store._conn.execute(
             "SELECT 1 FROM facts WHERE content = ?", (content.strip(),)
         ).fetchone()
