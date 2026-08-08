@@ -1,6 +1,7 @@
 # src/okf_ingest.py
 from __future__ import annotations
 
+import datetime
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,9 +22,14 @@ _StrTimestampLoader.add_constructor(
 )
 
 _SKIP_FILENAMES = {"index.md", "log.md"}
-_DEFAULT_TRUST = 0.5          # MemoryStore.default_trust default
-_BOOTSTRAP_TRUST = 0.9
-_STANDARD_TRUST = 0.7
+_SKIP_STATUSES = {"deprecated"}
+
+_DEFAULT_TRUST = 0.5           # Unverified / no verified block.
+                                # Intentionally below fact_store's default min_trust=0.7 —
+                                # new concepts without verified: or bootstrap: are invisible
+                                # to default searches. An agent or human must tag them.
+_AGENT_TRUST = 0.7             # verified.by: agent:...
+_HUMAN_TRUST = 0.9             # verified.by: human:... (or bootstrap: true)
 
 _STATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS okf_ingestion_state (
@@ -42,7 +48,7 @@ class ParsedConcept:
     content: str       # "{title}: {description}"
     category: str      # "infrastructure" unless overridden in frontmatter
     tags_str: str      # comma-separated tag string for MemoryStore
-    trust: float       # 0.9 (bootstrap) or 0.7 (standard)
+    trust: float       # 0.5 (unverified), 0.7 (agent:verified), or 0.9 (human:verified/bootstrap)
     timestamp: str     # ISO 8601 from frontmatter, or "" if absent
     file_path: str     # bundle-relative path, e.g. "hosts/rune.md"
 
@@ -52,20 +58,24 @@ class IngestResult:
     added: int = 0
     updated: int = 0
     skipped: int = 0
+    purged: int = 0
     errors: list[str] = field(default_factory=list)
 
     def __str__(self) -> str:
         return (
             f"added={self.added} updated={self.updated} "
-            f"skipped={self.skipped} errors={len(self.errors)}"
+            f"skipped={self.skipped} purged={self.purged} "
+            f"errors={len(self.errors)}"
         )
 
 
 def parse_okf_concept(file_path: Path, bundle_root: Path) -> ParsedConcept | None:
-    """Parse an OKF concept file. Returns None on any parse failure.
+    """Parse an OKF v0.2 concept file. Returns None on any parse failure,
+    or if the file is deprecated, expired (stale_after), or should be skipped.
 
     Extracts: type (required), title, description, tags, timestamp, bootstrap,
-    category. Falls back to first non-heading body line if description absent.
+    category, trust signals (verified, status, stale_after).
+    Falls back to first non-heading body line if description absent.
     Skips index.md and log.md (caller should filter, but we guard here too).
     """
     if file_path.name in _SKIP_FILENAMES:
@@ -92,6 +102,44 @@ def parse_okf_concept(file_path: Path, bundle_root: Path) -> ParsedConcept | Non
 
     if not fm.get("type"):
         return None
+
+    # --- OKF v0.2 Trust Signals ------------------------------------------------
+
+    # Deprecation gate: skip if status == "deprecated"
+    if str(fm.get("status", "")).strip().lower() in _SKIP_STATUSES:
+        logger.debug("parse_okf_concept: skipping deprecated %s", file_path)
+        return None  # caller must detect this was previously ingested and purge
+
+    # Staleness gate: skip if stale_after is in the past
+    stale_after = fm.get("stale_after")
+    if stale_after is not None:
+        try:
+            if isinstance(stale_after, datetime.datetime):
+                stale_date = stale_after.date()
+            elif isinstance(stale_after, datetime.date):
+                stale_date = stale_after
+            else:
+                stale_date = datetime.date.fromisoformat(str(stale_after).strip())
+            if stale_date < datetime.date.today():
+                logger.debug("parse_okf_concept: skipping stale %s (expired %s)", file_path, stale_date)
+                return None  # caller must detect this was previously ingested and purge
+        except (ValueError, TypeError):
+            logger.debug("parse_okf_concept: unparseable stale_after in %s", file_path)
+
+    # Trust score calibration from verified.by
+    trust = _DEFAULT_TRUST  # 0.5 — unverified
+    verified = fm.get("verified")
+    if isinstance(verified, dict):
+        by = verified.get("by", "")
+        if isinstance(by, str):
+            if by.startswith("human:"):
+                trust = _HUMAN_TRUST    # 0.9
+            elif by.startswith("agent:"):
+                trust = _AGENT_TRUST    # 0.7
+    elif fm.get("bootstrap"):
+        trust = _HUMAN_TRUST            # 0.9 — backward compat
+
+    # ---------------------------------------------------------------------------
 
     # Title: frontmatter > filename stem
     title = (fm.get("title") or "").strip() or file_path.stem
@@ -131,18 +179,30 @@ def parse_okf_concept(file_path: Path, bundle_root: Path) -> ParsedConcept | Non
         content=content,
         category=category,
         tags_str=tags_str,
-        trust=_BOOTSTRAP_TRUST if is_bootstrap else _STANDARD_TRUST,
+        trust=trust,
         timestamp=str(fm.get("timestamp") or ""),
         file_path=rel_path,
     )
 
 
 class OKFIngestor:
-    """Walk an OKF bundle and upsert facts into the Holographic store."""
+    """Walk an OKF bundle and upsert facts into the fact store."""
 
     def __init__(self, store) -> None:
         self._store = store
         self._ensure_schema()
+
+    @staticmethod
+    def _content_hash(content: str) -> int:
+        """Deterministic hash of normalized content for dedup."""
+        return hash(content.strip().lower())
+
+    def _content_exists(self, content: str) -> bool:
+        """Check if content already exists in the fact store (early dedup)."""
+        row = self._store._conn.execute(
+            "SELECT 1 FROM facts WHERE content = ?", (content.strip(),)
+        ).fetchone()
+        return row is not None
 
     def _ensure_schema(self) -> None:
         self._store._conn.executescript(_STATE_SCHEMA)
@@ -168,6 +228,8 @@ class OKFIngestor:
                 result.updated += 1
             elif outcome == "skipped":
                 result.skipped += 1
+            elif outcome == "purged":
+                result.purged += 1
             elif outcome is not None:
                 result.errors.append(f"{md_file.name}: {outcome}")
 
@@ -176,11 +238,33 @@ class OKFIngestor:
     def _ingest_file(
         self, bundle_root: Path, file_path: Path, *, dry_run: bool
     ) -> "str | None":
+        # Check for previously-ingested file BEFORE parse (handle deprecation/stale)
+        bundle_str = str(bundle_root)
+        rel_path = str(file_path.relative_to(bundle_root))
+        prev_row = self._store._conn.execute(
+            "SELECT fact_id FROM okf_ingestion_state "
+            "WHERE bundle_path = ? AND file_path = ?",
+            (bundle_str, rel_path),
+        ).fetchone()
+
         concept = parse_okf_concept(file_path, bundle_root)
         if concept is None:
+            # Previously ingested but now deprecated/stale — purge
+            if prev_row is not None:
+                if not dry_run:
+                    self._store.remove_fact(prev_row[0])
+                    self._store._conn.execute(
+                        "DELETE FROM okf_ingestion_state "
+                        "WHERE bundle_path = ? AND file_path = ?",
+                        (bundle_str, rel_path),
+                    )
+                    self._store._conn.commit()
+                return "purged"
             return None  # silently skip unparseable files (missing type, etc.)
 
-        bundle_str = str(bundle_root)
+        # Early content-hash dedup before any write
+        if self._content_exists(concept.content):
+            return "skipped"
 
         row = self._store._conn.execute(
             "SELECT timestamp, fact_id FROM okf_ingestion_state "
@@ -192,23 +276,47 @@ class OKFIngestor:
             stored_ts = row[0]
             stored_id = row[1]
             if stored_ts and stored_ts == concept.timestamp:
-                return "skipped"
-            # Timestamp changed — update
-            if not dry_run:
-                self._store.update_fact(
+                # Verify the fact still exists — state rows can survive
+                # fact deletion (memory tool prune, migration, manual cleanup),
+                # creating orphan rows that permanently block re-ingestion.
+                exists = self._store._conn.execute(
+                    "SELECT 1 FROM facts WHERE fact_id = ?", (stored_id,)
+                ).fetchone()
+                if exists is not None:
+                    return "skipped"
+                # Orphaned state row: fact was deleted, treat as new.
+                logger.debug(
+                    "_ingest_file: orphaned state row for %s (fact_id=%d gone); "
+                    "re-ingesting",
+                    concept.file_path,
                     stored_id,
-                    content=concept.content,
-                    tags=concept.tags_str,
-                    category=concept.category,
                 )
-                self._store._conn.execute(
-                    "UPDATE okf_ingestion_state "
-                    "SET timestamp = ?, ingested_at = CURRENT_TIMESTAMP "
-                    "WHERE bundle_path = ? AND file_path = ?",
-                    (concept.timestamp, bundle_str, concept.file_path),
-                )
-                self._store._conn.commit()
-            return "updated"
+                if not dry_run:
+                    self._store._conn.execute(
+                        "DELETE FROM okf_ingestion_state "
+                        "WHERE bundle_path = ? AND file_path = ?",
+                        (bundle_str, concept.file_path),
+                    )
+                    self._store._conn.commit()
+                # Fall through to "New concept" below — skip the update path
+                # (stored_id references a deleted fact).
+            else:
+                # Timestamp changed — update
+                if not dry_run:
+                    self._store.update_fact(
+                        stored_id,
+                        content=concept.content,
+                        tags=concept.tags_str,
+                        category=concept.category,
+                    )
+                    self._store._conn.execute(
+                        "UPDATE okf_ingestion_state "
+                        "SET timestamp = ?, ingested_at = CURRENT_TIMESTAMP "
+                        "WHERE bundle_path = ? AND file_path = ?",
+                        (concept.timestamp, bundle_str, concept.file_path),
+                    )
+                    self._store._conn.commit()
+                return "updated"
 
         # New concept
         if not dry_run:
