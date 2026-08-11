@@ -109,6 +109,7 @@ class FactRetriever:
         # Strip raw HRR bytes — callers expect JSON-serializable dicts
         for fact in results:
             fact.pop("hrr_vector", None)
+        self._increment_retrievals(results)
         return results
 
     def probe(
@@ -187,7 +188,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self._increment_retrievals(results)
+        return results
 
     def related(
         self,
@@ -255,7 +258,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self._increment_retrievals(results)
+        return results
 
     def reason(
         self,
@@ -333,7 +338,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self._increment_retrievals(results)
+        return results
 
     def contradict(
         self,
@@ -441,6 +448,20 @@ class FactRetriever:
         contradictions.sort(key=lambda x: x["contradiction_score"], reverse=True)
         return contradictions[:limit]
 
+    def _increment_retrievals(self, results: list[dict]) -> None:
+        """Increment retrieval_count for every fact in the result set."""
+        if not results:
+            return
+        ids = [r["fact_id"] for r in results if "fact_id" in r]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        self.store._conn.execute(
+            f"UPDATE facts SET retrieval_count = retrieval_count + 1 WHERE fact_id IN ({placeholders})",
+            ids,
+        )
+        self.store._conn.commit()
+
     def _score_facts_by_vector(
         self,
         target_vec: "np.ndarray",
@@ -476,7 +497,9 @@ class FactRetriever:
             scored.append(fact)
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:limit]
+        results = scored[:limit]
+        self._increment_retrievals(results)
+        return results
 
     def _fts_candidates(
         self,
