@@ -1,4 +1,4 @@
-"""hermes-memory-store — holographic memory plugin using MemoryProvider interface.
+"""hermes-memory-store — hermes memory plugin using MemoryProvider interface.
 
 Registers as a MemoryProvider plugin, giving the agent structured fact storage
 with entity resolution, trust scoring, and HRR-based compositional retrieval.
@@ -112,8 +112,8 @@ def _load_plugin_config() -> dict:
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
 
-class HolographicMemoryProvider(MemoryProvider):
-    """Holographic memory with structured facts, entity resolution, and HRR retrieval."""
+class HermesMemoryProvider(MemoryProvider):
+    """Hermes memory with structured facts, entity resolution, and HRR retrieval."""
 
     def __init__(self, config: dict | None = None):
         self._config = config or _load_plugin_config()
@@ -125,7 +125,7 @@ class HolographicMemoryProvider(MemoryProvider):
 
     @property
     def name(self) -> str:
-        return "holographic"
+        return "hermes-memory"
 
     def is_available(self) -> bool:
         return True  # SQLite is always available, numpy is optional
@@ -456,7 +456,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     min_trust=float(args.get("min_trust", self._min_trust)),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return json.dumps({"results": results, "count": len(results), "searched": args["query"]})
 
             elif action == "probe":
                 results = retriever.probe(
@@ -464,7 +464,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return json.dumps({"results": results, "count": len(results), "probed": args["entity"]})
 
             elif action == "related":
                 results = retriever.related(
@@ -472,7 +472,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return json.dumps({"results": results, "count": len(results), "related_to": args["entity"]})
 
             elif action == "reason":
                 entities = args.get("entities", [])
@@ -483,14 +483,14 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return json.dumps({"results": results, "count": len(results), "reasoning_from": args["entities"]})
 
             elif action == "contradict":
                 results = retriever.contradict(
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                return json.dumps({"results": results, "count": len(results), "contradiction_check": f"category={args.get('category', 'all')}"})
 
             elif action == "update":
                 updated = store.update_fact(
@@ -581,7 +581,7 @@ class HolographicMemoryProvider(MemoryProvider):
 # ---------------------------------------------------------------------------
 
 def register(ctx) -> None:
-    """Register the holographic memory provider with the plugin system."""
+    """Register the hermes-memory provider with the plugin system."""
     config = _load_plugin_config()
-    provider = HolographicMemoryProvider(config=config)
+    provider = HermesMemoryProvider(config=config)
     ctx.register_memory_provider(provider)

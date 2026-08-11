@@ -412,7 +412,7 @@ if __name__ == "__main__":
         _tr_stub = types.ModuleType("tools.registry")
         setattr(_tr_stub, "tool_error", lambda msg: f'{{"error": "{msg}"}}')
         sys.modules["tools.registry"] = _tr_stub
-    from plugins.memory.holographic.store import MemoryStore
+    from plugins.memory.hermes_memory.store import MemoryStore
 
     store = MemoryStore(db_path=args.db)
     ingestor = OKFIngestor(store)
