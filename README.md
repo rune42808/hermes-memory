@@ -96,6 +96,39 @@ previously ingested. Orphaned state rows (fact deleted but `okf_ingestion_state`
 row survived) are detected and repaired by re-ingesting instead of skipping
 ([romar#19](https://github.com/sackheads/romar/issues/19)).
 
+## Cross-Agent Fact Broadcast (NATS)
+
+Facts published by one agent are automatically ingested by the other via a
+write-side/poll-side pipeline over the NATS JetStream `agent-memory` stream
+(subject `agents.memory.shared.>`):
+
+```
+agent A                    NATS JetStream               agent B
+  nats-publish ──→  agent-memory stream  ──→  nats-listener (memory_poll_loop)
+                                                    │
+                                                    ├─ dedup (content hash)
+                                                    ├─ normalize
+                                                    └─ append to memory_spool.jsonl
+                                                          │
+                                              pre_llm_call hook (handler.py)
+                                                          │
+                                                    └─ upsert into memory_store.db
+```
+
+The listener polls the stream every 10 seconds alongside the coordination poll
+loop.  Each fact is deduplicated by content hash before write, and the spool
+file auto-trims oldest 25% when it exceeds 10MB.  The `pre_llm_call` hook reads
+the spool and upserts into the warm store before every turn.
+
+Trust scores work the same as OKF ingestion — `0.7` for infrastructure facts,
+`0.9` for bootstrap — and land below the default `min_trust_threshold` (0.3) so
+they're eligible for retrieval immediately.  The hot tier picks them up on the
+next `prefetch()`.
+
+This is the runtime path for shared knowledge.  OKF bundles handle curated,
+versioned facts; the broadcast pipeline handles facts discovered at runtime and
+pushed peer-to-peer.
+
 ## Installation
 
 Drop the `src/plugins/memory/hermes_memory/` directory into your Hermes plugins
